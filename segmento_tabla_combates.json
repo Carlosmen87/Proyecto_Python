@@ -1,0 +1,131 @@
+"arcadeDataSourceItems": [
+    {"type": "arcadeItem", "itemId": "9a8b8c82-15ed-4b71-8eb7-6b4254e523ec", "name": "Combates", "script": "// =====================================================================\n//  CONFIGURACIÓN: solo modifique este bloque\n// =====================================================================\nvar PORTAL_URL = 'https://portalgis.ejercito.mil.co/portal';\nvar ITEM_ID    = '26c3f7e3294f4d02a740f9d4ded9eb0a';\nvar LAYER_ID   = 1;\n\nvar CAMPO_CATEGORIA = 'HECHO_P';\nvar CAMPO_DIVISION  = 'DIVISION';      // campo por el que llegan los filtros\n\nvar CAMPO_FECHA = 'FECHA_HECHO';\nvar CAMPO_ANIO  = '';\n\nvar OPERACION  = 'CONTEO';             // 'CONTEO' o 'SUMA'\nvar CAMPO_SUMA = '';                   // obligatorio solo si OPERACION = 'SUMA'\n\nvar FILTRO_BASE = '1=1';\n\nvar FILAS = [\n  { etiqueta: 'POSITIVOS',      valores: ['P'] },\n  { etiqueta: 'NEGATIVOS',      valores: ['N'] },\n  { etiqueta: 'SIN RESULTADOS', valores: ['SR'] }\n];\n\nvar INCLUIR_TOTAL       = true;\nvar ETIQUETA_TOTAL      = 'TOTAL COMBATES';\nvar INCLUIR_FILA_BLANCO = true;\n\nvar ANIO_1 = 2025;\nvar ANIO_2 = 2026;\n// =====================================================================\n//  FIN DE LA CONFIGURACIÓN\n// =====================================================================\n\nvar campos = [CAMPO_CATEGORIA, CAMPO_DIVISION];\nif (!IsEmpty(CAMPO_ANIO)) { Push(campos, CAMPO_ANIO); } else { Push(campos, CAMPO_FECHA); }\nif (OPERACION == 'SUMA' && !IsEmpty(CAMPO_SUMA)) { Push(campos, CAMPO_SUMA); }\n\nvar fs = FeatureSetByPortalItem(Portal(PORTAL_URL), ITEM_ID, LAYER_ID, campos, false);\n\nfunction SqlValor(v) {\n  if (TypeOf(v) == 'Number') { return Text(v); }\n  return \"'\" + Replace(Text(v), \"'\", \"''\") + \"'\";\n}\n\nfunction WhereAnio(a) {\n  if (!IsEmpty(CAMPO_ANIO)) { return CAMPO_ANIO + ' = ' + Text(a); }\n  return CAMPO_FECHA + \" >= DATE '\" + Text(a) + \"-01-01' AND \" +\n         CAMPO_FECHA + \" < DATE '\"  + Text(a + 1) + \"-01-01'\";\n}\n\nfunction WhereFila(fila) {\n  var lista = '';\n  for (var i in fila.valores) {\n    lista += IIf(lista == '', '', ',') + SqlValor(fila.valores[i]);\n  }\n  return CAMPO_CATEGORIA + ' IN (' + lista + ')';\n}\n\n// Devuelve { 'DIV01': valor, 'DIV02': valor, ... }\nfunction MedirPorDivision(where) {\n  var expr = IIf(OPERACION == 'SUMA', CAMPO_SUMA, '1');\n  var est  = IIf(OPERACION == 'SUMA', 'SUM', 'COUNT');\n  var g = GroupBy(Filter(fs, where), [CAMPO_DIVISION], [{ name: 'VALOR', expression: expr, statistic: est }]);\n  var res = {};\n  for (var r in g) {\n    if (!IsEmpty(r[CAMPO_DIVISION])) {\n      res[Text(r[CAMPO_DIVISION])] = IIf(IsEmpty(r.VALOR), 0, r.VALOR);\n    }\n  }\n  return res;\n}\n\nfunction Valor(dic, div) { return IIf(HasKey(dic, div), dic[div], 0); }\n\n// 0 y 0 -> 0 %; 0 y >0 -> N/A; resto -> cálculo normal\nfunction Porcentaje(a1, a2) {\n  if (a1 == 0 && a2 == 0) { return 0; }\n  if (a1 == 0) { return null; }\n  return Round((a2 - a1) / a1 * 100, 0);\n}\n\nfunction Clave(n, etiqueta) { return Text(n, '00') + '|' + etiqueta; }\n\n// Lista de divisiones\nvar divisiones = [];\nfor (var d in Distinct(Filter(fs, FILTRO_BASE), CAMPO_DIVISION)) {\n  if (!IsEmpty(d[CAMPO_DIVISION])) { Push(divisiones, Text(d[CAMPO_DIVISION])); }\n}\n\n// Consultas: 2 por fila (una por año), agrupadas por división\nvar medidas = [];\nfor (var k in FILAS) {\n  var base = '(' + FILTRO_BASE + ') AND (' + WhereFila(FILAS[k]) + ')';\n  Push(medidas, {\n    a1: MedirPorDivision(base + ' AND ' + WhereAnio(ANIO_1)),\n    a2: MedirPorDivision(base + ' AND ' + WhereAnio(ANIO_2))\n  });\n}\n\nvar nombre1 = 'A_' + Text(ANIO_1);\nvar nombre2 = 'A_' + Text(ANIO_2);\nvar features = [];\n\nfunction Agregar(div, clave, etiqueta, v1, v2) {\n  var attr = { DIVISION: div, CLAVE: clave, EVENTO: etiqueta,\n               DIFERENCIA: v2 - v1, PORCENTAJE: Porcentaje(v1, v2) };\n  attr[nombre1] = v1;\n  attr[nombre2] = v2;\n  Push(features, { attributes: attr });\n}\n\nfor (var x in divisiones) {\n  var div = divisiones[x];\n  var t1 = 0;\n  var t2 = 0;\n  for (var k in FILAS) {\n    var v1 = Valor(medidas[k].a1, div);\n    var v2 = Valor(medidas[k].a2, div);\n    t1 += v1;\n    t2 += v2;\n    Agregar(div, Clave(k + 1, FILAS[k].etiqueta), FILAS[k].etiqueta, v1, v2);\n  }\n  if (INCLUIR_TOTAL)       { Agregar(div, Clave(98, ETIQUETA_TOTAL), ETIQUETA_TOTAL, t1, t2); }\n  if (INCLUIR_FILA_BLANCO) { Agregar(div, Clave(99, ''), '', 0, 0); }\n}\n\nvar salida = {\n  fields: [\n    { name: 'DIVISION',   type: 'esriFieldTypeString' },\n    { name: 'CLAVE',      type: 'esriFieldTypeString' },\n    { name: 'EVENTO',     type: 'esriFieldTypeString' },\n    { name: nombre1,      type: 'esriFieldTypeDouble' },\n    { name: nombre2,      type: 'esriFieldTypeDouble' },\n    { name: 'DIFERENCIA', type: 'esriFieldTypeDouble' },\n    { name: 'PORCENTAJE', type: 'esriFieldTypeDouble' }\n  ],\n  geometryType: '',\n  features: features\n};\n\nreturn FeatureSet(Text(salida));", "refreshInterval": 180}
+],
+"desktopView": {
+    "layout": {"type": "dockingLayout", "rootElement": {"width": 1, "height": 1, "id": "773b064f-94aa-41d2-ac8a-e86cae300418", "elements": [{"width": 0.5, "height": 1, "type": "itemLayoutElement", "id": "de104df7-bc36-47e7-ad7e-006dbb56e96d"}, {"width": 0.5, "height": 1, "id": "9b30379f-0a13-4281-be9a-6b8c090d2f72", "elements": [{"width": 1, "height": 0.05360134003350084, "id": "2e3b7c41-3954-4b9e-9b79-31eeb23c89a9", "elements": [{"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "7f44b603-036a-48b3-8df8-9623f7a82ba5"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "0dd01b44-fab5-4ccf-9214-379b8d7e3f7a"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "90e1bb08-4c26-4348-b8f0-d474947e3cfe"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "c629b2a5-bc38-4a2a-a43e-7721c72804ae"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "7a67f864-4137-4ea7-a3c3-c808aefaaa90"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "9e16e986-4767-4475-90f4-1838fb6df247"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "b79bb5fe-cc49-4f3f-a938-58da296f4bb0"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "920d1022-0be6-433b-9fe6-99a1aeb7f3dd"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "f1f1cfc2-1dd9-4a91-9dd2-b7994171925a"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "cc9f5ccd-3141-4c3d-9b43-7066e8697d67"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "a985645c-961f-4640-98a3-ebea7732aaf6"}, {"width": 0.08333333333333333, "height": 1, "type": "itemLayoutElement", "id": "6c7dac08-ca29-4242-be85-ac1a4db88642"}], "type": "stackLayoutElement", "orientation": "col"}, {"width": 1, "height": 0.9463986599664992, "id": "5d51be09-4538-4eef-8b0c-e278ffed71e2", "elements": [{"width": 1, "height": 0.0625, "type": "itemLayoutElement", "id": "96257a16-a090-4f8f-be67-5eaac93b422f"}, {"width": 1, "height": 0.0625, "type": "itemLayoutElement", "id": "121a2ae7-f2fa-40ac-b001-1ee6d9d2171f"}, {"width": 1, "height": 0.125, "type": "itemLayoutElement", "id": "b2f20ff6-ff6f-4c6a-ab52-dee79e19a62e"}, {"width": 1, "height": 0.25, "type": "itemLayoutElement", "id": "7c7e479a-51fc-4fa7-8142-59324758ba42"}, {"width": 1, "height": 0.5, "type": "itemLayoutElement", "id": "c0eab320-1492-4a03-a210-13b145bcbe2d"}], "type": "groupLayoutElement", "orientation": "row"}], "type": "stackLayoutElement", "orientation": "row"}], "type": "stackLayoutElement", "orientation": "col"}},
+    "type": "desktop",
+    "widgets": [
+{
+  "id": "de104df7-bc36-47e7-ad7e-006dbb56e96d",
+  "name": "Tabla combates",
+  "showLastUpdate": false,
+  "noDataState": {
+    "verticalAlignment": "middle",
+    "showTopCaption": true,
+    "showBottomCaption": true
+  },
+  "noFilterState": {
+    "verticalAlignment": "middle",
+    "showTopCaption": true,
+    "showBottomCaption": true
+  },
+  "datasets": [
+    {
+      "type": "serviceDataset",
+      "name": "main",
+      "dataSource": {
+        "type": "arcadeDataSource",
+        "itemId": "9a8b8c82-15ed-4b71-8eb7-6b4254e523ec"
+      },
+      "groupByFields": [
+        "CLAVE"
+      ],
+      "orderByFields": [
+        "CLAVE ASC"
+      ],
+      "statisticDefinitions": [
+        {
+          "statisticType": "sum",
+          "onStatisticField": "A_2025",
+          "outStatisticFieldName": "sum_A_2025"
+        },
+        {
+          "statisticType": "sum",
+          "onStatisticField": "A_2026",
+          "outStatisticFieldName": "sum_A_2026"
+        },
+        {
+          "statisticType": "sum",
+          "onStatisticField": "DIFERENCIA",
+          "outStatisticFieldName": "sum_DIFERENCIA"
+        },
+        {
+          "statisticType": "sum",
+          "onStatisticField": "PORCENTAJE",
+          "outStatisticFieldName": "sum_PORCENTAJE"
+        }
+      ],
+      "clientSideStatistics": true,
+      "outFields": [
+        "*"
+      ],
+      "returnDistinctValues": false,
+      "allowSourceDownload": false,
+      "allowSummaryDownload": false
+    }
+  ],
+  "arcadeEnabled": true,
+  "expression": "function Col(opciones) {\n  for (var i in opciones) {\n    if (HasKey($datapoint, opciones[i])) { return opciones[i]; }\n  }\n  return opciones[0];\n}\n\nfunction Num(campo) {\n  var v = $datapoint[campo];\n  return IIf(IsEmpty(v), 0, Number(v));\n}\n\nvar agrupada = !HasKey($datapoint, 'EVENTO');\n\nvar COL_EVENTO = IIf(agrupada, 'CLAVE', 'EVENTO');\nvar COL_2025   = Col(['sum_A_2025', 'A_2025', 'A_2025_sum', 'SUM_A_2025']);\nvar COL_2026   = Col(['sum_A_2026', 'A_2026', 'A_2026_sum', 'SUM_A_2026']);\nvar COL_DIF    = Col(['sum_DIFERENCIA', 'DIFERENCIA', 'DIFERENCIA_sum', 'SUM_DIFERENCIA']);\nvar COL_PCT    = Col(['sum_PORCENTAJE', 'PORCENTAJE', 'PORCENTAJE_sum', 'SUM_PORCENTAJE']);\nvar ETIQUETA_TOTAL = 'TOTAL COMBATES';\n\nvar etiqueta = '';\nif (agrupada) {\n  var partes = Split(Text($datapoint[COL_EVENTO]), '|');\n  etiqueta = IIf(Count(partes) > 1, partes[1], '');\n} else {\n  etiqueta = IIf(IsEmpty($datapoint.EVENTO), '', $datapoint.EVENTO);\n}\n\nvar blanco  = etiqueta == '';\nvar esTotal = etiqueta == ETIQUETA_TOTAL;\n\nvar v1  = Num(COL_2025);\nvar v2  = Num(COL_2026);\nvar dif = v2 - v1;\n\nvar pct = '';\nif (v1 == 0 && v2 == 0) { pct = '0 %'; }\nelse if (v1 == 0)       { pct = 'N/A'; }\nelse                    { pct = Text(Round(dif / v1 * 100, 0)) + ' %'; }\n\nvar rojo  = IIf(dif < 0, '#C00000', '');\nvar fondo = IIf(esTotal, '#D9D9D9', '');\n\nfunction Celda(texto, color, alin) {\n  return {\n    displayText: IIf(blanco, '', texto),\n    textColor: color,\n    backgroundColor: fondo,\n    textAlign: alin,\n    iconName: '',\n    iconAlign: '',\n    iconColor: '',\n    iconOutlineColor: ''\n  };\n}\n\nvar cells = {};\ncells[COL_EVENTO] = Celda(etiqueta, '', 'left');\ncells[COL_2025]   = Celda(Text(v1, '#,##0'), '', 'center');\ncells[COL_2026]   = Celda(Text(v2, '#,##0'), '', 'center');\ncells[COL_DIF]    = Celda(Text(dif, '#,##0'), rojo, 'center');\ncells[COL_PCT]    = Celda(pct, rojo, 'center');\n\nreturn { cells: cells };\n",
+  "arcadeRefreshEnabled": false,
+  "events": [],
+  "type": "tableWidget",
+  "dataSettings": {
+    "type": "groupByValues",
+    "fieldName": "CLAVE",
+    "labelOverrides": []
+  },
+  "tableSettings": {
+    "layout": "fit-columns",
+    "scale": "medium",
+    "hoverText": false,
+    "rowStriping": false,
+    "selectionMode": "none",
+    "verticalGrid": {
+      "thickness": 1
+    },
+    "horizontalGrid": {
+      "thickness": 1
+    },
+    "headerSettings": null
+  },
+  "columnSettings": [
+    {
+      "title": "EVENTO",
+      "fieldName": "CLAVE",
+      "isBold": false,
+      "isItalic": false,
+      "isUnderlined": false
+    },
+    {
+      "title": "2025",
+      "fieldName": "sum_A_2025",
+      "isBold": false,
+      "isItalic": false,
+      "isUnderlined": false
+    },
+    {
+      "title": "2026",
+      "fieldName": "sum_A_2026",
+      "isBold": false,
+      "isItalic": false,
+      "isUnderlined": false
+    },
+    {
+      "title": "DIFERENCIA",
+      "fieldName": "sum_DIFERENCIA",
+      "isBold": false,
+      "isItalic": false,
+      "isUnderlined": false
+    },
+    {
+      "title": "PORCENTAJE",
+      "fieldName": "sum_PORCENTAJE",
+      "isBold": false,
+      "isItalic": false,
+      "isUnderlined": false
+    }
+  ],
+  "iconInfos": [],
+  "editingEnabled": false,
+  "editColumnPlacement": "end"
+},

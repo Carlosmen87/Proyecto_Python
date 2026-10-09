@@ -1,0 +1,203 @@
+// =====================================================================
+//  CONFIGURACIÓN GENERAL
+// =====================================================================
+var PORTAL_URL  = 'https://portalgis.ejercito.mil.co/portal';
+var ANIO_1      = 2025;
+var ANIO_2      = 2026;
+var CAMPO_FECHA = 'FECHA_HECHO';
+
+// Campos por los que llegan los filtros del tablero (deben existir en todas las capas).
+// DIVISION debe ir de primera.
+var DIMENSIONES = ['DIVISION', 'BRIGADA', 'DEPARTAMENTO', 'D_AMENAZA', 'LINEA_OPERACION'];
+
+// true = la tabla muestra sus filas en 0 cuando el filtro no tiene datos
+var RELLENAR_CEROS = true;
+
+// Utilidades para armar los filtros SQL (no modificar)
+function SqlValor(v) {
+  if (TypeOf(v) == 'Number') { return Text(v); }
+  return "'" + Replace(Text(v), "'", "''") + "'";
+}
+function SqlLista(valores) {
+  var s = '';
+  for (var i in valores) { s += IIf(s == '', '', ',') + SqlValor(valores[i]); }
+  return '(' + s + ')';
+}
+
+// =====================================================================
+//  CONFIGURACIÓN DE LA TABLA: COMBATES
+// =====================================================================
+var ITEM_ID     = '26c3f7e3294f4d02a740f9d4ded9eb0a';
+var LAYER_ID    = 1;
+var FILTRO_BASE = '1=1';
+
+var INCLUIR_TOTAL       = true;
+var ETIQUETA_TOTAL      = 'TOTAL COMBATES';
+var INCLUIR_FILA_BLANCO = true;
+
+// operacion: 'CONTEO' (cuenta registros) o 'SUMA' (suma campoSuma)
+var FILAS = [
+  { etiqueta: 'POSITIVOS',      itemId: ITEM_ID, layerId: LAYER_ID, operacion: 'CONTEO', campoSuma: '',
+    where: '(' + FILTRO_BASE + ") AND HECHO_P IN ('P')" },
+  { etiqueta: 'NEGATIVOS',      itemId: ITEM_ID, layerId: LAYER_ID, operacion: 'CONTEO', campoSuma: '',
+    where: '(' + FILTRO_BASE + ") AND HECHO_P IN ('N')" },
+  { etiqueta: 'SIN RESULTADOS', itemId: ITEM_ID, layerId: LAYER_ID, operacion: 'CONTEO', campoSuma: '',
+    where: '(' + FILTRO_BASE + ") AND HECHO_P IN ('SR')" }
+];
+
+// =====================================================================
+//  MOTOR: no modificar debajo de esta línea
+// =====================================================================
+var portalObj = Portal(PORTAL_URL);
+var SEP = '¦';
+
+function WhereRango(desde, hasta) {
+  return CAMPO_FECHA + " >= DATE '" + Text(desde) + "-01-01' AND " +
+         CAMPO_FECHA + " < DATE '"  + Text(hasta + 1) + "-01-01'";
+}
+
+function TextoDim(v) {
+  if (IsEmpty(v)) { return ''; }
+  return Text(v);
+}
+
+function UnirLlave(vals) {
+  var s = '';
+  for (var i in vals) { s += IIf(i == 0, '', SEP) + vals[i]; }
+  return s;
+}
+
+function Vacios() {
+  var v = [];
+  for (var i in DIMENSIONES) { Push(v, ''); }
+  return v;
+}
+
+// llave -> [valores de las dimensiones]
+var grupos = {};
+
+function Registrar(vals) {
+  var ll = UnirLlave(vals);
+  if (!HasKey(grupos, ll)) { grupos[ll] = vals; }
+}
+
+// Suma (o conteo) de una fila en un año, agrupada por todas las dimensiones
+function Medir(fila, anio) {
+  var capa  = FeatureSetByPortalItem(portalObj, fila.itemId, fila.layerId, ['*'], false);
+  var where = '(' + fila.where + ') AND (' + WhereRango(anio, anio) + ')';
+  var expr  = IIf(fila.operacion == 'SUMA', fila.campoSuma, '1');
+  var est   = IIf(fila.operacion == 'SUMA', 'SUM', 'COUNT');
+  var g = GroupBy(Filter(capa, where), DIMENSIONES,
+                  [{ name: 'TOTAL_CANT', expression: expr, statistic: est }]);
+  var res = {};
+  var total = 0;
+  for (var r in g) {
+    var vals = [];
+    for (var i in DIMENSIONES) { Push(vals, TextoDim(r[DIMENSIONES[i]])); }
+    var ll = UnirLlave(vals);
+    var cant = 0;
+    if (!IsEmpty(r.TOTAL_CANT)) { cant = r.TOTAL_CANT; }
+    if (HasKey(res, ll)) { res[ll] = res[ll] + cant; } else { res[ll] = cant; }
+    total += cant;
+    Registrar(vals);
+  }
+  Console(fila.etiqueta + ' ' + Text(anio) + ': ' + Text(total));
+  return res;
+}
+
+// Grupos en cero para que la tabla nunca quede "Sin datos"
+var capasVistas = {};
+function Rellenar(itemId, layerId) {
+  var id = itemId + '_' + Text(layerId);
+  if (HasKey(capasVistas, id)) { return; }
+  capasVistas[id] = true;
+  var capa = FeatureSetByPortalItem(portalObj, itemId, layerId, ['*'], false);
+
+  // 1) Cada valor de cada dimensión (todo el histórico de la capa)
+  for (var j in DIMENSIONES) {
+    for (var d in Distinct(capa, DIMENSIONES[j])) {
+      var x = TextoDim(d[DIMENSIONES[j]]);
+      if (x == '') { continue; }
+      var v = Vacios();
+      v[j] = x;
+      Registrar(v);
+    }
+  }
+
+  // 2) DIVISION + cada una de las otras dimensiones (periodo analizado)
+  var periodo = Filter(capa, WhereRango(ANIO_1, ANIO_2));
+  for (var j2 in DIMENSIONES) {
+    if (j2 == 0) { continue; }
+    for (var d2 in Distinct(periodo, [DIMENSIONES[0], DIMENSIONES[j2]])) {
+      var a = TextoDim(d2[DIMENSIONES[0]]);
+      var b = TextoDim(d2[DIMENSIONES[j2]]);
+      if (a == '' || b == '') { continue; }
+      var v2 = Vacios();
+      v2[0]  = a;
+      v2[j2] = b;
+      Registrar(v2);
+    }
+  }
+}
+
+function ValorDe(dic, ll) {
+  if (!HasKey(dic, ll)) { return 0; }
+  return dic[ll];
+}
+
+// 0 y 0 -> 0 %; 0 y >0 -> N/A; resto -> cálculo normal
+function Porcentaje(a1, a2) {
+  if (a1 == 0 && a2 == 0) { return 0; }
+  if (a1 == 0) { return null; }
+  return Round((a2 - a1) / a1 * 100, 0);
+}
+
+function Clave(n, texto) { return Text(n, '00') + '|' + texto; }
+
+var medidas = [];
+for (var k in FILAS) {
+  Push(medidas, { a1: Medir(FILAS[k], ANIO_1), a2: Medir(FILAS[k], ANIO_2) });
+}
+if (RELLENAR_CEROS) {
+  for (var k2 in FILAS) { Rellenar(FILAS[k2].itemId, FILAS[k2].layerId); }
+}
+
+var nombre1 = 'A_' + Text(ANIO_1);
+var nombre2 = 'A_' + Text(ANIO_2);
+var features = [];
+
+function Agregar(vals, cv, texto, v1, v2) {
+  var attr = { CLAVE: cv, EVENTO: texto,
+               DIFERENCIA: v2 - v1, PORCENTAJE: Porcentaje(v1, v2) };
+  for (var i in DIMENSIONES) { attr[DIMENSIONES[i]] = IIf(vals[i] == '', null, vals[i]); }
+  attr[nombre1] = v1;
+  attr[nombre2] = v2;
+  Push(features, { attributes: attr });
+}
+
+for (var ll in grupos) {
+  var vals = grupos[ll];
+  var t1 = 0;
+  var t2 = 0;
+  for (var k3 in FILAS) {
+    var v1 = ValorDe(medidas[k3].a1, ll);
+    var v2 = ValorDe(medidas[k3].a2, ll);
+    t1 += v1;
+    t2 += v2;
+    Agregar(vals, Clave(k3 + 1, FILAS[k3].etiqueta), FILAS[k3].etiqueta, v1, v2);
+  }
+  if (INCLUIR_TOTAL)       { Agregar(vals, Clave(98, ETIQUETA_TOTAL), ETIQUETA_TOTAL, t1, t2); }
+  if (INCLUIR_FILA_BLANCO) { Agregar(vals, Clave(99, ''), '', 0, 0); }
+}
+Console('Filas generadas: ' + Text(Count(features)));
+
+var camposSalida = [];
+for (var i in DIMENSIONES) { Push(camposSalida, { name: DIMENSIONES[i], type: 'esriFieldTypeString' }); }
+Push(camposSalida, { name: 'CLAVE',      type: 'esriFieldTypeString' });
+Push(camposSalida, { name: 'EVENTO',     type: 'esriFieldTypeString' });
+Push(camposSalida, { name: nombre1,      type: 'esriFieldTypeDouble' });
+Push(camposSalida, { name: nombre2,      type: 'esriFieldTypeDouble' });
+Push(camposSalida, { name: 'DIFERENCIA', type: 'esriFieldTypeDouble' });
+Push(camposSalida, { name: 'PORCENTAJE', type: 'esriFieldTypeDouble' });
+
+return FeatureSet(Text({ fields: camposSalida, geometryType: '', features: features }));
